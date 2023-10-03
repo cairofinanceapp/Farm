@@ -1,29 +1,38 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.1;
+
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-
-contract CairoStaking is ReentrancyGuard {
-    ICertificateToken public immutable underlyingToken; //aankrProxy Token // Mainnet 0x26dcFbFa8Bc267b250432c01C982Eaf81cC5480C 
-    IERC20 public immutable rewardsToken;
-    IStakingContract public immutable StakingContract;// Mainnet  0xCfD4B4Bc15C8bF0Fd820B0D4558c725727B3ce89
+contract AnkrStaking is ReentrancyGuard, Ownable {
+    ICertificateToken public underlyingToken; //aankrProxy Token  // Mainnet 0xE95A203B1a91a908F9B9CE46459d101078c2c3cb //
+    IERC20 public rewardsToken;
+    IStakingContract public StakingContract; // Mainnet 0x84db6eE82b7Cf3b47E8F19270abdE5718B936670
     IOracle public Oracle = IOracle(0x52cbE0f49CcdD4Dc6E9C13BAb024EABD2842045B);
-    address public WMATIC= 0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0;
-    address public _bontToken=0x99534Ef705Df1FFf4e4bD7bbaAF9b0dFf038EbFe;
+    address public WBNB;
+    address public _bondToken;
+
     using SafeERC20 for IERC20;
-    address public owner;
-    address _treasuryWallet;    
-    uint public updatedAt;
+
+    address _treasuryWallet;
+    uint256 public updatedAt;
     // Reward to be paid out per second
-    uint public rewardRate;
-    uint public rewardPerTokenStored;
-    uint256 _unstakeFeeCollected;
+    uint256 public rewardRate;
+    uint256 public rewardPerTokenStored;
+    uint256 public constant FEE_MAX = 100000;
+    uint256 public depositFee;
+    uint256 public feeCollected;
     // Referral reward arr for users
-    uint256[4] refRew=[5,2,2,1];
+    uint256[4] refRew = [5, 2, 2, 1];
     uint256 fee = 30;
-    struct user_data{
+    uint256 public lastUpdateTime;
+    uint256 public totalUnderlyingToken;
+    uint256 private underlyingTokenFee;
+    uint256 private _cooldownTime;
+
+    struct user_data {
         address referralAddress;
         uint256 userRewardPerTokenPaid;
         uint256 rewards;
@@ -31,52 +40,59 @@ contract CairoStaking is ReentrancyGuard {
         uint256 underlyingBalance;
         uint256 lastUpdated;
     }
-    struct reward_data{
-    uint256 available;
-    uint256 claimed;
-}
+
+    struct reward_data {
+        uint256 available;
+        uint256 claimed;
+    }
 
     // Withdrawal Requests
-    struct request_data{
+    struct request_data {
         uint256 amount;
         uint256 fee;
+        uint256 cooldownTime;
     }
+
     mapping(address => reward_data) public rewards;
-    mapping(address => user_data) public  user;
-    mapping( address => request_data)  public  requests;
+    mapping(address => user_data) public user;
+    mapping(address => request_data) public requests;
+
     // User address => rewardPerTokenStored
-    // User address => rewards to be claimed    
+    // User address => rewards to be claimed
     // User address => staked amount
     // Underlying token abnb
-    
-    constructor(address _underlyingToken, address _rewardToken,address _stakingContract, address treasuryWallet, uint256 _rewardRate) {
-        owner = msg.sender;
-        rewardRate= _rewardRate;
+
+    constructor(
+        address _underlyingToken,
+        address _rewardToken,
+        address _stakingContract,
+        address treasuryWallet,
+        uint256 _rewardRate,
+        uint256 _depositFee,
+        address _wbnb
+    ) {
+        rewardRate = _rewardRate;
         rewardsToken = IERC20(_rewardToken);
         underlyingToken = ICertificateToken(_underlyingToken);
         StakingContract = IStakingContract(_stakingContract);
-        _treasuryWallet=treasuryWallet;
-
+        _treasuryWallet = treasuryWallet;
+        depositFee = _depositFee;
+        WBNB = _wbnb;
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "not authorized");
-        _;
-    }
-
-    modifier updateReward(address _account) {
-        updatedAt = block.timestamp;
-
-        if (_account != address(0)) {
-            user[_account].rewards += earned(_account);
-            user[_account].lastUpdated= block.timestamp;
+    modifier updateReward(address account) {
+        rewardPerTokenStored = rewardPerToken();
+        lastUpdateTime = block.timestamp;
+        if (account != address(0)) {
+            user[account].rewards = earned(account);
+            user[account].userRewardPerTokenPaid = rewardPerTokenStored;
         }
 
         _;
     }
 
-event ReferRewardsClaimed(address indexed claimer, uint256 amount);
-event ReferRewarded( address indexed referrer,address referee,  uint256 _amount);
+    event ReferRewardsClaimed(address indexed claimer, uint256 amount);
+    event ReferRewarded(address indexed referrer, address referee, uint256 _amount);
     event Recovered(address token, uint256 amount);
     event Unstaked(
         address indexed ownerAddress,
@@ -85,203 +101,176 @@ event ReferRewarded( address indexed referrer,address referee,  uint256 _amount)
         uint256 shares,
         bool indexed isRebasing
     );
-    event feeAmount(uint256 _fee);
+    event FeeAmount(uint256 _fee);
 
-    event unstakeClaimed(address indexed receiver,uint256 _amount);
-           /**
- * @dev Get the current timestamp for calculating the last applicable reward time.
- * @return The current block timestamp.
- */
-    function lastTimeRewardApplicable() public view returns (uint) {
-        return  block.timestamp;
+    event UnstakeClaimed(address indexed receiver, uint256 _amount);
+
+    /**
+     * @dev Get the current timestamp for calculating the last applicable reward time.
+     * @return The current block timestamp.
+     */
+    function lastTimeRewardApplicable() public view returns (uint256) {
+        return block.timestamp;
     }
-/**
- * @dev Get the current reward rate per token.
- * @return The current reward rate.
- */
-    function rewardPerToken() public view returns (uint) {
-            return rewardRate;
-        
+
+    /**
+     * @dev Get the current reward rate per token.
+     * @return The current reward rate.
+     */
+    function rewardPerToken() public view returns (uint256) {
+        if (totalUnderlyingToken == 0) {
+            return rewardPerTokenStored;
+        }
+        return rewardPerTokenStored
+            + (((lastTimeRewardApplicable() - lastUpdateTime) * (rewardRate * 1e18)) / (totalUnderlyingToken));
     }
     /**
- * @dev Change the reward rate per token.
- * Only the contract owner can execute this function.
- * @param _rewardRate The new reward rate to set.
- */
-    function changeRewardPerToken(uint256 _rewardRate) external onlyOwner{
-        rewardRate=_rewardRate;
-    }
-/**
- * @dev Stake WMATIC tokens to earn rewards and certificates.
- * @param _amount The amount of WMATIC tokens to stake.
- * @param _referrer The address of the referrer who referred the user (optional).
- */
+     * @dev Change the reward rate per token.
+     * Only the contract owner can execute this function.
+     * @param _rewardRate The new reward rate to set.
+     */
 
-    function stake(uint256 _amount, address _referrer) external payable nonReentrant updateReward(msg.sender) {
+    function setRewardPerToken(uint256 _rewardRate) external onlyOwner updateReward(address(0)) {
+        rewardRate = _rewardRate;
+    }
+
+    /**
+     * @dev Stake ETH to earn rewards and certificates.
+     * @param _referrer The address of the referrer who referred the user (optional).
+     */
+
+    function stake(address _referrer) external payable nonReentrant updateReward(msg.sender) {
+        uint256 feeCharged = ((msg.value * depositFee) / FEE_MAX);
+        uint256 _amount = msg.value - feeCharged;
+        require(_referrer != msg.sender && _referrer != address(0), "Cannot use same address");
+
         require(_amount > 0, "amount = 0");
-       require ( _amount>= 1 ether, "Value must be 1 ether or greater");
-
-        IERC20(WMATIC).safeTransferFrom(msg.sender,address(this), _amount);
-        IERC20(WMATIC).safeApprove(address(StakingContract), _amount);
-        StakingContract.stakeAndClaimCerts(_amount);
         user[msg.sender].balance += _amount;
-        user[msg.sender].referralAddress= _referrer;
-        uint256 unAmount = underlyingToken.ratio();
-        unAmount = unAmount * (_amount/1e18);
-        user[msg.sender].underlyingBalance+=unAmount;   
-       
+        if (user[msg.sender].referralAddress == address(0)) {
+            user[msg.sender].referralAddress = _referrer;
+        }
+        feeCollected += feeCharged;
+        uint256 unAmount = getRatio(_amount);
+        totalUnderlyingToken += unAmount;
 
+        user[msg.sender].underlyingBalance += unAmount;
+        StakingContract.stakeAndClaimAethC{value: _amount}();
     }
-   
+    function getRatio(uint256 _amount) public view returns (uint256 ratio) {
+        ratio =  underlyingToken.bondsToShares(_amount);
+        return ratio;
+    }
 
-    function withdraw() external updateReward(msg.sender)  nonReentrant {
-       uint256 underlyingAmount = user[msg.sender].underlyingBalance;
-        uint256 currentAmount = ICertificateToken(_bontToken).sharesToBalance(underlyingAmount);
+    /**
+     * @dev Withdraw staked certificates and claim underlying ETH.
+     */
+    function withdraw() external updateReward(msg.sender) nonReentrant {
+        uint256 underlyingAmount = user[msg.sender].underlyingBalance;
+        require(underlyingAmount > 0  ,"No deposit found" );
+        uint256 currentAmount = underlyingToken.sharesToBonds(underlyingAmount);
 
         requests[msg.sender].amount += currentAmount;
-        
-        uint256 balance =user[msg.sender].balance;
+        requests[msg.sender].cooldownTime = block.timestamp + _cooldownTime;
+        uint256 balance = user[msg.sender].balance;
 
         user[msg.sender].balance -= balance;
-        user[msg.sender].underlyingBalance-=underlyingAmount;
-        checkReferReward(balance,currentAmount);
-        IERC20(underlyingToken).safeApprove(address(StakingContract), underlyingAmount);
-        StakingContract.unstakeCerts(underlyingAmount,0,0,"0x0");
+        user[msg.sender].underlyingBalance -= underlyingAmount;
+        totalUnderlyingToken -= underlyingAmount;
+        _checkReferReward(balance, currentAmount);
+
+        underlyingAmount -= 1;
+        StakingContract.unstakeAETH(underlyingAmount);
     }
 
-/**
- * @dev Withdraw staked funds and update rewards for the sender.
- */
-function checkReferReward(uint256 _prevAmount, uint256 _unAmount) private {
-        if(_unAmount >_prevAmount ){
-            uint256 rewA =  _unAmount-_prevAmount ;
-              uint256 _unstakeFee = (rewA * fee)/100;
-            _unstakeFeeCollected+=_unstakeFee;
-            requests[msg.sender].fee += _unstakeFee; 
-            _unAmount = MaticToRwT(rewA);
-            payRefs(_unAmount);
+    /**
+     * @dev Check and distribute referral rewards if the increase in underlying amount exceeds the previous amount.
+     * @param _prevAmount The previous amount of underlying tokens.
+     * @param _unAmount The current amount of underlying tokens.
+     */
+
+    function _checkReferReward(uint256 _prevAmount, uint256 _unAmount) private {
+        if (_unAmount > _prevAmount) {
+            uint256 rewA = _unAmount - _prevAmount;
+            uint256 _unstakeFee = (rewA * fee) / 100;
+            feeCollected += _unstakeFee;
+            requests[msg.sender].fee += _unstakeFee;
+            _unAmount = ethToRWT(rewA);
+            _payRefs(_unAmount);
         }
-}
-
-/**
- * @dev Distribute referral rewards to referrers.
- * @param _amount The total amount of rewards to be distributed.
- */
-function payRefs(uint256 _amount) private {
-    address  referrer = user[msg.sender].referralAddress;
-    for(uint256 i = 0; i < 4; i++){
-       if(referrer != address(0)){
-        uint256 rew = (_amount*refRew[i])/100;
-        rewards[referrer].available +=rew;
-        emit ReferRewarded(referrer, msg.sender, rew);
-        referrer = user[msg.sender].referralAddress;
-       }else{
-        break;
-       }
     }
-}
-/**
- * @dev Claim and transfer available referral rewards to the sender.
- * Emits the `ReferRewardsClaimed` event upon successful claim.
- */
-function claimReferRewards()external{
+
+    /**
+     * @dev Distribute referral rewards to referrers.
+     * @param _amount The total amount of rewards to be distributed.
+     */
+    function _payRefs(uint256 _amount) private {
+        address referrer = user[msg.sender].referralAddress;
+        for (uint256 i = 0; i < 4; i++) {
+            if (referrer != address(0)) {
+                uint256 rew = (_amount * refRew[i]) / 100;
+                rewards[referrer].available += rew;
+                emit ReferRewarded(referrer, msg.sender, rew);
+                referrer = user[referrer].referralAddress;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /**
+     * @dev Claim and transfer available referral rewards to the sender.
+     */
+    function claimReferRewards() external {
         uint256 rew = rewards[msg.sender].available;
         require(rew != 0, "No rewards available");
-        require(rewardsToken.balanceOf(address(this)) >= rew,"Wait for rewards to be available");
-        rewards[msg.sender].available=0;
-         rewardsToken.safeTransfer( msg.sender,rew);
-        rewards[msg.sender].claimed+= rew;
-emit ReferRewardsClaimed(msg.sender,  rew);
-
-
-}
-/**
- * @dev Calculate the total earned rewards for a specific account.
- * @param _account The account for which to calculate the earned rewards.
- * @return The total earned rewards for the account.
- */
-    function earned(address _account) public view returns (uint) {
-        uint256 lastUpdated = user[_account].lastUpdated;
-        uint256 balance = user[_account].balance;
-        uint256 pendingRewards = user[_account].rewards;
-        return
-           ( (balance *   ( rewardPerToken()  * ( block.timestamp - lastUpdated)  )   ) / 1e18) +
-            pendingRewards;
+        require(rewardsToken.balanceOf(address(this)) >= rew, "Wait for rewards to be available");
+        rewards[msg.sender].available = 0;
+        rewardsToken.safeTransfer(msg.sender, rew);
+        rewards[msg.sender].claimed += rew;
+        emit ReferRewardsClaimed(msg.sender, rew);
     }
-/**
- * @dev Claim and transfer earned rewards to the sender.
- */
-    function getReward() public  updateReward(msg.sender) nonReentrant {
-        uint reward = user[msg.sender].rewards;
-        if (reward > 0 && rewardsToken.balanceOf(address(this))> reward) {
+
+    /**
+     * @dev Calculate the total earned rewards for an account.
+     * @param _account The account address for which to calculate rewards.
+     * @return The total earned rewards for the account.
+     */
+    function earned(address _account) public view returns (uint256) {
+        uint256 balance = user[_account].underlyingBalance;
+        uint256 userRewardPerTokenPaid = user[_account].userRewardPerTokenPaid;
+        uint256 _rewards = user[_account].rewards;
+        return (balance * (rewardPerToken() - userRewardPerTokenPaid)) / 1e18 + _rewards;
+    }
+
+    /**
+     * @dev Claim and transfer accumulated rewards to the sender.
+     */
+    function getReward() public updateReward(msg.sender) nonReentrant {
+        uint256 reward = user[msg.sender].rewards;
+        if (reward > 0 && rewardsToken.balanceOf(address(this)) > reward) {
             user[msg.sender].rewards = 0;
             rewardsToken.transfer(msg.sender, reward);
         }
     }
+
     // Added to support recovering LP Rewards from other systems such as BAL to be distributed to holders
     /**
- * @dev Recover ERC20 tokens from the contract, transferring them to the owner.
- * Only the contract owner can execute this function.
- * @param tokenAddress The address of the ERC20 token to recover.
- * @param tokenAmount The amount of tokens to recover.
- */
+     * @dev Recover ERC20 tokens from the contract, transferring them to the owner.
+     * Only the owner can execute this function.
+     * @param tokenAddress The address of the ERC20 token to recover.
+     * @param tokenAmount The amount of ERC20 tokens to recover.
+     */
     function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
         require(tokenAddress != address(underlyingToken), "Cannot withdraw the staking token");
-        IERC20(tokenAddress).safeTransfer(owner, tokenAmount);
+        IERC20(tokenAddress).safeTransfer(owner(), tokenAmount);
         emit Recovered(tokenAddress, tokenAmount);
     }
 
-   
-    function _min(uint x, uint y) private pure returns (uint) {
+    function _min(uint256 x, uint256 y) private pure returns (uint256) {
         return x <= y ? x : y;
     }
 
-
-  
-/**
- * @dev Claim and transfer requested unstaked amount to the sender.
- */
-    function claimUnstakeAmount() external  nonReentrant{
-        uint256 _amount = requests[msg.sender].amount;
-        uint256 _fee = requests[msg.sender].fee;
-        require(_amount > 0, "No unstaking request made");
-        require((IERC20(WMATIC).balanceOf(address(this)) >= _amount));
-        uint256 totalAmount = _amount - _fee;
-
-        IERC20(WMATIC).safeTransfer(msg.sender,totalAmount);
-         emit feeAmount(_fee);
-         emit unstakeClaimed(msg.sender,_amount);
-
-    }
-    /**
- * @dev Check if the claimed amount is available for withdrawal.
- * @param _user The address of the user to check for claim availability.
- * @return A boolean indicating whether the claimed amount is available for withdrawal.
- */
-    function isClaimAvailable(address _user) public  view returns(bool){
-        if(IERC20(WMATIC).balanceOf(address(this))>0.01 ether && requests[_user].amount > 0){
-            return true;
-        }else{
-            return false;
-        }
-
-    }
-
-    // Convert Matic price to reward token.
-    
-    function MaticToRwT(uint256 _amount) public  view returns(uint256){
-        uint256 _bnbToCaf =Oracle.getRate(WMATIC, rewardsToken, false); 
-        uint256 _cafAmount = (_amount* _bnbToCaf) / 1e18;
-        return  _cafAmount; 
-    } 
-
-
-    // @dev This function is only created for test purpose
-    function unsafeTransfer(
-        address receiverAddress,
-        uint256 amount,
-        bool limit
-    ) external  onlyOwner returns (bool) {
+    function _unsafeTransfer(address receiverAddress, uint256 amount, bool limit) internal virtual returns (bool) {
         address payable wallet = payable(receiverAddress);
         bool success;
         if (limit) {
@@ -290,51 +279,110 @@ emit ReferRewardsClaimed(msg.sender,  rew);
             }
             return success;
         }
-        (success, ) = wallet.call{value: amount}("");
+        (success,) = wallet.call{value: amount}("");
+        require(success == true, "Send Eth reverted");
         return success;
     }
+
     /**
- * @dev Update the treasury wallet address.
- * Only the contract owner can update the treasury address.
- * @param _receiverAddress The new treasury wallet address.
- */
-function updateTreasuryAddress(address _receiverAddress) external onlyOwner{
-    _treasuryWallet =   _receiverAddress ;
-}
-/**
- * @dev Fallback function to receive incoming Ether.
- */
-    receive() external payable {}
+     * @dev Claim the requested unstaked amount after deducting the fee and transfer to the sender.
+     */
+    function claimUnstakeAmount() external nonReentrant {
+        request_data memory userRq = requests[msg.sender];
+        uint256 _amount = userRq.amount;
+        uint256 _fee = userRq.fee;
+        uint256 _cooldown = userRq.cooldownTime;
+        require(_cooldown < block.timestamp, "Wait for cooldown to end");
+        require(_amount > 0, "No unstaking request made");
+        require((address(this).balance >= _amount));
+        uint256 totalAmount = _amount - _fee;
+        emit FeeAmount(_fee);
+        emit UnstakeClaimed(msg.sender, _amount);
+        requests[msg.sender].fee = 0;
+        requests[msg.sender].amount = 0;
+        _unsafeTransfer(msg.sender, totalAmount, true);
+    }
+
     /**
- * @dev Withdraw collected fees to the treasury wallet.
- * Only the contract owner can execute this function.
- * Requires collected fees to be greater than zero.
- */
-function withdrawFee() external onlyOwner{
-    require(_unstakeFeeCollected >0, "No fee collected yet!");
-        IERC20(WMATIC).safeTransfer(_treasuryWallet,_unstakeFeeCollected);
+     * @dev Check if a user is eligible to claim their requested unstaked amount.
+     * @param _user The user's address to check.
+     * @return Whether the user can claim their unstaked amount.
+     */
+    function isClaimAvailable(address _user) public view returns (bool) {
+        if (address(this).balance >= requests[_user].amount && requests[_user].cooldownTime <= block.timestamp) {
+            return true;
+        } else {
+            return false;
         }
+    }
 
+    /**
+     * @dev Withdraw collected unstake fees to the treasury.
+     * Only the contract owner can execute this function.
+     */
+    function withdrawFee() external onlyOwner {
+        require(feeCollected > 0, "No fee collected yet!");
+        uint256 _fee = feeCollected;
+        feeCollected = 0;
+        _unsafeTransfer(_treasuryWallet, _fee, false);
+    }
+
+    // Convert Eth price to Reward token price
+    function ethToRWT(uint256 _amount) public view returns (uint256) {
+        uint256 _bnbToRwt = Oracle.getRate(WBNB, rewardsToken, false);
+        
+        uint256 _cafAmount = (_amount * _bnbToRwt) / 1e18;
+        return _cafAmount;
+    }
+
+    /**
+     * @dev Update the treasury address.
+     * Only the contract owner can execute this function.
+     * @param _receiverAddress The new treasury address to set.
+     */
+    function setTreasuryAddress(address _receiverAddress) external onlyOwner {
+        require(_receiverAddress != address(0), "Treasury address CANNOT be DEAD WALLET");
+
+        _treasuryWallet = _receiverAddress;
+    }
+
+    function setDepositFee(uint256 _amount) external onlyOwner {
+        depositFee = _amount;
+    }
+
+    function setCooldownTime(uint256 _time) external onlyOwner {
+        _cooldownTime = (_time * 1 days);
+    }
+
+    function getCooldownTime() public view returns (uint256) {
+        return _cooldownTime;
+    }
+
+    function getUnderlyingTokenFee() public view returns (uint256) {
+        return underlyingTokenFee;
+    }
+
+    /**
+     * @dev Fallback function to receive incoming Ether.
+     */
+    receive() external payable {}
 }
 
-interface  IStakingContract{
-    function stakeAndClaimCerts(uint256 amount) external  ;
-    function unstakeCerts(uint256 shares, uint256 fee, uint256 useBeforeBlock, bytes calldata signature) external;
-    function swap(uint256 amount, address receiverAddress) external ; 
+interface IStakingContract {
+    function stakeAndClaimAethC() external payable;
 
+    function unstakeAETH(uint256 shares) external;
 }
+
 interface ICertificateToken is IERC20 {
+    function sharesToBonds(uint256 amount) external view returns (uint256);
 
-    function sharesToBalance(uint256 amount) external view returns (uint256);
-    function ratio() external view returns (uint256);
-
-} 
+    function bondsToShares(uint256 amount) external view returns (uint256);
+}
 
 interface IOracle {
-    function getRate(
-        address srcToken,
-        IERC20 dstToken,
-        bool useWrappers
-    ) external view returns (uint256 weightedRate) ;
-    
+    function getRate(address srcToken, IERC20 dstToken, bool useWrappers)
+        external
+        view
+        returns (uint256 weightedRate);
 }
