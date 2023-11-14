@@ -5,20 +5,22 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import {console} from "forge-std/console.sol";
 
-abstract contract IERC20ExtentedExtented is IERC20 {
-    function decimals() public view virtual returns (uint8);
+interface IERC20Extented is IERC20 {
+    function decimals() external view returns (uint8);
 }
 
 contract AnkrStaking is ReentrancyGuard, Ownable {
-    ICertificateToken public underlyingToken; //aankrProxy Token  // Mainnet 0xE95A203B1a91a908F9B9CE46459d101078c2c3cb //
-    IERC20ExtentedExtented public rewardsToken;
-    IStakingContract public StakingContract; // Mainnet 0x84db6eE82b7Cf3b47E8F19270abdE5718B936670
-    address public WBNB;
-    address public _bondToken;
+    ICertificateToken public immutable underlyingToken; //aankrProxy Token // Mainnet 0x26dcFbFa8Bc267b250432c01C982Eaf81cC5480C
+    IERC20Extented public immutable rewardsToken;
+    IStakingContract public immutable StakingContract; // Mainnet  0xCfD4B4Bc15C8bF0Fd820B0D4558c725727B3ce89
+    address public WMATIC = 0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0;
+    address public _bontToken = 0x99534Ef705Df1FFf4e4bD7bbaAF9b0dFf038EbFe;
+    uint256 public constant minimumCooldown = 2 days;
     uint256 public minimumUnstake;
 
-    using SafeERC20 for IERC20ExtentedExtented;
+    using SafeERC20 for IERC20Extented;
 
     address _treasuryWallet;
     uint256 public updatedAt;
@@ -27,13 +29,14 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     uint256 public rewardPerTokenStored;
     uint256 public constant FEE_MAX = 100000;
     uint256 public depositFee;
+    uint256 public minimumStake;
     uint256 public feeCollected;
-    uint256 public minimumCooldown;
     // Referral reward arr for users
     uint256[4] refRew = [5, 2, 2, 1];
     uint256 fee = 30;
     uint256 public lastUpdateTime;
     uint256 public totalUnderlyingToken;
+    uint256 public underlyingTokenFee;
     uint256 private _cooldownTime;
 
     struct user_data {
@@ -60,7 +63,6 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     mapping(address => reward_data) public rewards;
     mapping(address => user_data) public user;
     mapping(address => request_data) public requests;
-
     // User address => rewardPerTokenStored
     // User address => rewards to be claimed
     // User address => staked amount
@@ -71,22 +73,17 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         address _rewardToken,
         address _stakingContract,
         address treasuryWallet,
-        uint256 _rewardRate,
-        uint256 _depositFee,
-        address _wbnb,
-        uint256 minimumCooldownTime
+        uint256 _rewardRate
     ) {
         rewardRate = _rewardRate;
-        rewardsToken = IERC20ExtentedExtented(_rewardToken);
-        require(rewardsToken.decimals() == 18, "Reward token only supports 18 decimal");
+        rewardsToken = IERC20Extented(_rewardToken);
         lastUpdateTime = block.timestamp;
+
+        require(rewardsToken.decimals() == 18, "Reward token only supports 18 decimal");
 
         underlyingToken = ICertificateToken(_underlyingToken);
         StakingContract = IStakingContract(_stakingContract);
         _treasuryWallet = treasuryWallet;
-        depositFee = _depositFee;
-        WBNB = _wbnb;
-        minimumCooldown = minimumCooldownTime * 1 days;
     }
 
     modifier updateReward(address account) {
@@ -102,7 +99,6 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
 
     event ReferRewardsClaimed(address indexed claimer, uint256 amount);
     event ReferRewarded(address indexed referrer, address referee, uint256 _amount);
-    event Recovered(address token, uint256 amount);
     event Unstaked(
         address indexed ownerAddress,
         address indexed receiverAddress,
@@ -118,14 +114,15 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
      * @dev Get the current timestamp for calculating the last applicable reward time.
      * @return The current block timestamp.
      */
+
     function lastTimeRewardApplicable() public view returns (uint256) {
         return block.timestamp;
     }
-
     /**
      * @dev Get the current reward rate per token.
      * @return The current reward rate.
      */
+
     function rewardPerToken() public view returns (uint256) {
         if (totalUnderlyingToken == 0) {
             return rewardPerTokenStored;
@@ -144,39 +141,46 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
 
         rewardRate = _rewardRate;
     }
-
     /**
-     * @dev Stake ETH to earn rewards and certificates.
+     * @dev Stake WMATIC tokens to earn rewards and certificates.
+     * @param _amount The amount of WMATIC tokens to stake.
      * @param _referrer The address of the referrer who referred the user (optional).
      */
 
-    function stake(address _referrer) external payable nonReentrant updateReward(msg.sender) {
-        uint256 feeCharged = ((msg.value * depositFee) / FEE_MAX);
-        uint256 _amount = msg.value - feeCharged;
+    function stake(uint256 _amount, address _referrer)
+        external
+        payable
+        nonReentrant
+        updateReward(msg.sender)
+        returns (uint256)
+    {
         require(_referrer != msg.sender && _referrer != address(0), "Cannot use same address");
+        require(_amount % 1 ether == 0, "Value must be a whole number");
 
-        require(_amount > 0, "amount = 0");
+        require(_amount >= getMinStake(), "Value must be  greater than minimum stake value");
+        IERC20Extented(WMATIC).safeTransferFrom(msg.sender, address(this), _amount);
+        IERC20Extented(WMATIC).safeApprove(address(StakingContract), _amount);
         user[msg.sender].balance += _amount;
         if (user[msg.sender].referralAddress == address(0)) {
             user[msg.sender].referralAddress = _referrer;
         }
-        feeCollected += feeCharged;
-        uint256 unAmount = getRatio(_amount);
+        uint256 unAmount = getRatioConversion(_amount);
+
+        uint256 feeCharged = ((unAmount * depositFee) / FEE_MAX);
+        console.log(feeCharged);
+        unAmount -= feeCharged;
+        underlyingTokenFee += feeCharged;
+
         totalUnderlyingToken += unAmount;
-
         user[msg.sender].underlyingBalance += unAmount;
-        StakingContract.stakeAndClaimAethC{value: _amount}();
+        StakingContract.stakeAndClaimCerts(_amount);
+        return unAmount;
     }
 
-    function getRatio(uint256 _amount) public view returns (uint256 ratio) {
-        ratio = underlyingToken.bondsToShares(_amount);
-        return ratio;
-    }
-
-    /**
-     * @dev Withdraw staked certificates and claim underlying ETH.
-     */
-    function withdraw() external updateReward(msg.sender) nonReentrant {
+    function withdraw() external payable updateReward(msg.sender) nonReentrant {
+        require(user[msg.sender].balance > 0, "No Deposits made");
+        uint256 _ethUnstakeFee = getEthUnstakeFee();
+        require(msg.value == _ethUnstakeFee, "Invalid amount sent");
         uint256 underlyingAmount = user[msg.sender].underlyingBalance;
         require(underlyingAmount >= minimumUnstake, "Invalid amount Called");
 
@@ -185,19 +189,21 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
 
         user[msg.sender].balance -= balance;
         user[msg.sender].underlyingBalance -= underlyingAmount;
-
         underlyingAmount -= 1;
+        IERC20Extented(underlyingToken).safeApprove(address(StakingContract), underlyingAmount);
         totalUnderlyingToken -= underlyingAmount;
-        uint256 currentAmount = underlyingToken.sharesToBonds(underlyingAmount);
+        uint256 currentAmount = ICertificateToken(_bontToken).sharesToBalance(underlyingAmount);
         requests[msg.sender].amount += currentAmount;
         _checkReferReward(balance, currentAmount);
-        StakingContract.unstakeAETH(underlyingAmount);
+        StakingContract.unstakeCerts{value: msg.value}(underlyingAmount, 0, 0, "0x0");
     }
 
+    function getEthUnstakeFee() public view returns (uint256) {
+        uint256 _ethUnstakeFee = StakingContract.ethUnstakeFee();
+        return _ethUnstakeFee;
+    }
     /**
-     * @dev Check and distribute referral rewards if the increase in underlying amount exceeds the previous amount.
-     * @param _prevAmount The previous amount of underlying tokens.
-     * @param _unAmount The current amount of underlying tokens.
+     * @dev Withdraw staked funds and update rewards for the sender.
      */
 
     function _checkReferReward(uint256 _prevAmount, uint256 _unAmount) private {
@@ -205,8 +211,6 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
             uint256 rewA = _unAmount - _prevAmount;
             uint256 _unstakeFee = (rewA * fee) / 100;
             requests[msg.sender].fee += _unstakeFee;
-            // feeCollected += _unstakeFee;
-            // _payRefs(rewA);
         }
     }
 
@@ -230,25 +234,26 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         }
         feeCollected += (_amount - feeTransferred);
     }
-
     /**
      * @dev Claim and transfer available referral rewards to the sender.
+     * Emits the `ReferRewardsClaimed` event upon successful claim.
      */
-    function claimReferRewards() external {
+
+    function claimReferRewards() external nonReentrant {
         uint256 rew = rewards[msg.sender].available;
         require(rew != 0, "No rewards available");
-        require(address(this).balance >= rew, "Wait for rewards to be available");
+        require(IERC20Extented(WMATIC).balanceOf(address(this)) >= rew, "Wait for rewards to be available");
         rewards[msg.sender].available = 0;
-        _unsafeTransfer(msg.sender, rew, true);
+        IERC20Extented(WMATIC).safeTransfer(msg.sender, rew);
         rewards[msg.sender].claimed += rew;
         emit ReferRewardsClaimed(msg.sender, rew);
     }
-
     /**
-     * @dev Calculate the total earned rewards for an account.
-     * @param _account The account address for which to calculate rewards.
+     * @dev Calculate the total earned rewards for a specific account.
+     * @param _account The account for which to calculate the earned rewards.
      * @return The total earned rewards for the account.
      */
+
     function earned(address _account) public view returns (uint256) {
         uint256 balance = user[_account].underlyingBalance;
         uint256 userRewardPerTokenPaid = user[_account].userRewardPerTokenPaid;
@@ -257,81 +262,46 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @dev Claim and transfer accumulated rewards to the sender.
+     * @dev Claim and transfer earned rewards to the sender.
      */
     function getReward() public updateReward(msg.sender) nonReentrant {
         uint256 reward = user[msg.sender].rewards;
-        require(rewardsToken.balanceOf(address(this)) > reward, "FF");
         if (reward > 0 && rewardsToken.balanceOf(address(this)) > reward) {
             user[msg.sender].rewards = 0;
             rewardsToken.transfer(msg.sender, reward);
+            emit RewardClaimed(msg.sender, address(rewardsToken), reward);
         }
     }
 
-    // Added to support recovering LP Rewards from other systems such as BAL to be distributed to holders
-    /**
-     * @dev Recover ERC20 tokens from the contract, transferring them to the owner.
-     * Only the owner can execute this function.
-     * @param tokenAddress The address of the ERC20 token to recover.
-     * @param tokenAmount The amount of ERC20 tokens to recover.
-     */
-    function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
-        require(tokenAddress != address(underlyingToken), "Cannot withdraw the staking token");
-        IERC20ExtentedExtented(tokenAddress).safeTransfer(owner(), tokenAmount);
-        emit Recovered(tokenAddress, tokenAmount);
-    }
-
-    function _min(uint256 x, uint256 y) private pure returns (uint256) {
-        return x <= y ? x : y;
-    }
-
-    function _unsafeTransfer(address receiverAddress, uint256 amount, bool limit) internal virtual returns (bool) {
-        address payable wallet = payable(receiverAddress);
-        bool success;
-        if (limit) {
-            assembly {
-                success := call(27000, wallet, amount, 0, 0, 0, 0)
-            }
-            require(success == true, "Send Eth reverted");
-
-            return success;
-        }
-        (success,) = wallet.call{value: amount}("");
-        require(success == true, "Send Eth reverted");
-        return success;
-    }
+    event RewardClaimed(address indexed userAddress, address indexed tokenAddress, uint256 reward);
 
     /**
-     * @dev Claim the requested unstaked amount after deducting the fee and transfer to the sender.
+     * @dev Claim and transfer requested unstaked amount to the sender.
      */
     function claimUnstakeAmount() external nonReentrant {
         request_data memory userRq = requests[msg.sender];
         uint256 _amount = userRq.amount;
         uint256 _fee = userRq.fee;
         uint256 _cooldown = userRq.cooldownTime;
-        require(isClaimAvailable(msg.sender), "No Claim Available Rn");
         require(_cooldown < block.timestamp, "Wait for cooldown to end");
         require(_amount > 0, "No unstaking request made");
-        require((address(this).balance >= _amount));
+        require(isClaimAvailable(msg.sender), "No claim available");
         uint256 totalAmount = _amount - _fee;
         emit FeeAmount(_fee);
         emit UnstakeClaimed(msg.sender, _amount);
         requests[msg.sender].fee = 0;
         requests[msg.sender].amount = 0;
         _payRefs(_fee);
-        _unsafeTransfer(msg.sender, totalAmount, true);
+        IERC20Extented(WMATIC).safeTransfer(msg.sender, totalAmount);
     }
-
     /**
-     * @dev Check if a user is eligible to claim their requested unstaked amount.
-     * @param _user The user's address to check.
-     * @return Whether the user can claim their unstaked amount.
+     * @dev Check if the claimed amount is available for withdrawal.
+     * @param _user The address of the user to check for claim availability.
+     * @return A boolean indicating whether the claimed amount is available for withdrawal.
      */
+
     function isClaimAvailable(address _user) public view returns (bool) {
-        if (
-            address(this).balance - feeCollected >= (requests[_user].amount)
-                && requests[_user].cooldownTime <= block.timestamp
-        ) {
+        if (address(this).balance >= requests[_user].amount && requests[_user].cooldownTime <= block.timestamp) {
             return true;
         } else {
             return false;
@@ -339,31 +309,22 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @dev Withdraw collected unstake fees to the treasury.
-     * Only the contract owner can execute this function.
-     */
-    function withdrawFee() external onlyOwner {
-        require(feeCollected > 0, "No fee collected yet!");
-        uint256 _fee = feeCollected;
-        feeCollected = 0;
-        _unsafeTransfer(_treasuryWallet, _fee, false);
-    }
-
-    /**
-     * @dev Update the treasury address.
-     * Only the contract owner can execute this function.
-     * @param _receiverAddress The new treasury address to set.
+     * @dev Update the treasury wallet address.
+     * Only the contract owner can update the treasury address.
+     * @param _receiverAddress The new treasury wallet address.
      */
     function setTreasuryAddress(address _receiverAddress) external onlyOwner {
         require(_receiverAddress != address(0), "Treasury address CANNOT be DEAD WALLET");
 
         _treasuryWallet = _receiverAddress;
     }
+    /**
+     * @dev Fallback function to receive incoming Ether.
+     */
 
-    function setDepositFee(uint256 _fee) external onlyOwner {
-        require(_fee / 1_000 <= 30, "Invalid Fee");
-
-        depositFee = _fee;
+    function getMinStake() public view returns (uint256) {
+        uint256 _amount = StakingContract.getMinimumStake();
+        return _amount;
     }
 
     function setCooldownTime(uint256 _time) external onlyOwner {
@@ -375,26 +336,91 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         return _cooldownTime;
     }
 
+    function getRatioConversion(uint256 _amount) public view returns (uint256) {
+        uint256 _ratio = safeCeilMultiplyAndDivide(_amount, underlyingToken.ratio(), 1e18);
+        return _ratio;
+    }
+
+    function safeCeilMultiplyAndDivide(uint256 a, uint256 b, uint256 c) internal pure returns (uint256) {
+        uint256 remainder = a % c;
+        uint256 result = a / c;
+        bool safe;
+        (safe, result) = tryMul(result, b);
+        if (!safe) {
+            return 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        }
+        (safe, result) = tryAdd(result, ((remainder * b) + (c - 1)) / c);
+        if (!safe) {
+            return 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        }
+        return result;
+    }
+
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    receive() external payable {}
+    /**
+     * @dev Withdraw collected fees to the treasury wallet.
+     * Only the contract owner can execute this function.
+     * Requires collected fees to be greater than zero.
+     */
+
+    function withdrawFee() external onlyOwner {
+        require(feeCollected > 0, "No fee collected yet!");
+        uint256 _fee = feeCollected;
+        feeCollected = 0;
+        IERC20Extented(WMATIC).safeTransfer(_treasuryWallet, _fee);
+    }
+
+    function withdrawStakeFee() external onlyOwner {
+        require(underlyingTokenFee > 0, "No token collected yet!");
+        uint256 _fee = underlyingTokenFee;
+        underlyingTokenFee = 0;
+        IERC20Extented(underlyingToken).safeTransfer(_treasuryWallet, _fee);
+    }
+
+    function setDepositFee(uint256 _fee) external onlyOwner {
+        require(_fee / 1_000 <= 30, "Invalid Fee");
+
+        depositFee = _fee;
+    }
+
     function setMinimumUnStake(uint256 _amount) external onlyOwner {
-        require(_amount > 0 && _amount <= 10 ether, "Amount should be less than 0.1");
+        require(_amount > 0 ether && _amount <= 10 ether, "Amount should be less than 0.1");
 
         minimumUnstake = _amount;
     }
-
-    /**
-     * @dev Fallback function to receive incoming Ether.
-     */
-    receive() external payable {}
 }
 
 interface IStakingContract {
-    function stakeAndClaimAethC() external payable;
-
-    function unstakeAETH(uint256 shares) external;
+    function ethUnstakeFee() external view returns (uint256);
+    function getMinimumStake() external view returns (uint256);
+    function stakeAndClaimCerts(uint256 amount) external;
+    function unstakeCerts(uint256 shares, uint256 fee, uint256 useBeforeBlock, bytes calldata signature)
+        external
+        payable;
+    function swap(uint256 amount, address receiverAddress) external;
 }
 
-interface ICertificateToken {
-    function sharesToBonds(uint256 amount) external view returns (uint256);
-
-    function bondsToShares(uint256 amount) external view returns (uint256);
+interface ICertificateToken is IERC20Extented {
+    function sharesToBalance(uint256 amount) external view returns (uint256);
+    function ratio() external view returns (uint256);
 }
