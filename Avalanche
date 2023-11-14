@@ -144,7 +144,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
      */
 
     function setRewardPerToken(uint256 _rewardRate) external onlyOwner updateReward(address(0)) {
-        require(rewardRate > 0 ,"Reward rate must be greater than 0");
+        require(rewardRate > 0, "Reward rate must be greater than 0");
         rewardRate = _rewardRate;
     }
 
@@ -185,21 +185,21 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
      * @dev Distribute referral rewards to up to 4 levels of referrers.
      * @param _amount The total reward amount to distribute.
      */
-     function _payRefs(uint256 _amount) private {
+    function _payRefs(uint256 _amount) private {
         address referrer = user[msg.sender].referralAddress;
-        uint256 feeTransferred ;
+        uint256 feeTransferred;
         for (uint256 i = 0; i < 4; i++) {
             if (referrer != address(0)) {
                 uint256 rew = (_amount * refRew[i]) / 100;
                 rewards[referrer].available += rew;
-                feeTransferred+= rew;
+                feeTransferred += rew;
                 emit ReferRewarded(referrer, msg.sender, rew);
                 referrer = user[referrer].referralAddress;
             } else {
                 break;
             }
         }
-        feeCollected+= (_amount - feeTransferred);
+        feeCollected += (_amount - feeTransferred);
     }
 
     /**
@@ -208,12 +208,12 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     function claimReferRewards() external {
         uint256 rew = rewards[msg.sender].available;
         require(rew != 0, "No rewards available");
-        require(rewardsToken.balanceOf(address(this)) >= rew, "Wait for rewards to be available");
+        require(address(this).balance >= rew, "Wait for rewards to be available");
         rewards[msg.sender].available = 0;
         _unsafeTransfer(msg.sender, rew, true);
         rewards[msg.sender].claimed += rew;
         emit ReferRewardsClaimed(msg.sender, rew);
-    }   
+    }
 
     /**
      * @dev Calculate the total earned rewards for a given account.
@@ -227,7 +227,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         return (balance * (rewardPerToken() - userRewardPerTokenPaid)) / 1e18 + _rewards;
     }
 
-    /** 
+    /**
      * @dev Claim and transfer pending rewards to the sender.
      */
     function getReward() public updateReward(msg.sender) nonReentrant {
@@ -267,6 +267,8 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
             assembly {
                 success := call(27000, wallet, amount, 0, 0, 0, 0)
             }
+            require(success == true, "Send Eth reverted");
+
             return success;
         }
         (success,) = wallet.call{value: amount}("");
@@ -300,7 +302,6 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
      * @return Whether the user can claim their unstaked amount.
      */
     function isClaimAvailable(address _user) public view returns (bool) {
-        
         if (
             (address(this).balance - feeCollected) >= requests[_user].amount
                 && requests[_user].cooldownTime <= block.timestamp
@@ -324,17 +325,17 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     }
 
     function setMinimumUnStake(uint256 _amount) external onlyOwner {
-        require(_amount > 0 && _amount <= 10 ether,"Amount should be less than 0.1");
+        require(_amount > 0 && _amount <= 10 ether, "Amount should be less than 0.1");
         minimumUnstake = _amount;
     }
-       function setMinimumStake(uint256 _amount) external onlyOwner {
-        require(_amount > 0 && _amount <= 10 ether,"Amount should be less than 0.1");
+
+    function setMinimumStake(uint256 _amount) external onlyOwner {
+        require(_amount > 0 && _amount <= 10 ether, "Amount should be less than 0.1");
         minimumStake = _amount;
     }
 
-
     function setDepositFee(uint256 _fee) external onlyOwner {
-        require(_fee/FEE_MAX <= 30,"Invalid Fee");
+        require(_fee / 1_000 <= 30, "Invalid Fee");
         depositFee = _fee;
     }
 
@@ -420,8 +421,6 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         return (true, c);
     }
 
-
-
     receive() external payable {}
 }
 
@@ -438,5 +437,3 @@ interface ICertificateToken is IERC20Extented {
 
     function ratio() external view returns (uint256);
 }
-
-
