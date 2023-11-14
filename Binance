@@ -9,9 +9,10 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 interface IERC20Extented is IERC20 {
     function decimals() external view returns (uint8);
 }
+
 contract AnkrStaking is ReentrancyGuard, Ownable {
     ICertificateToken public underlyingToken; //aankrProxy Token //Testnet 0x3C1039C346bd5141BF2D5e855928E61655658fA7 // Mainnet 0x52F24a5e03aee338Da5fd9Df68D2b6FAe1178827 //
-     IERC20Extented public rewardsToken;
+    IERC20Extented public rewardsToken;
 
     IStakingContract public StakingContract; //Testnet 0x3c9205b5d4b312ca7c4d28110c91fe2c74718a94 // Mainnet  0x9e347Af362059bf2E55839002c699F7A5BaFE86E
     IPancakeInterface public constant Router = IPancakeInterface(0x10ED43C718714eb63d5aA57B78B54704E256024E);
@@ -19,7 +20,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     address public WBNB;
     uint256 public constant minimumCooldown = 7 days;
 
-    using SafeERC20 for  IERC20Extented;
+    using SafeERC20 for IERC20Extented;
 
     address _treasuryWallet;
     uint256 public updatedAt;
@@ -79,7 +80,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         lastUpdateTime = block.timestamp;
 
         rewardRate = _rewardRate;
-        rewardsToken =  IERC20Extented(_rewardToken);
+        rewardsToken = IERC20Extented(_rewardToken);
         require(rewardsToken.decimals() == 18, "Reward token only supports 18 decimal");
 
         underlyingToken = ICertificateToken(_underlyingToken);
@@ -274,7 +275,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
      */
     function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
         require(tokenAddress != address(underlyingToken), "Cannot withdraw the staking token");
-         IERC20Extented(tokenAddress).safeTransfer(owner(), tokenAmount);
+        IERC20Extented(tokenAddress).safeTransfer(owner(), tokenAmount);
         emit Recovered(tokenAddress, tokenAmount);
     }
 
@@ -293,7 +294,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         require(underlyingTokenFee > 0, "No fee collected yet!");
         uint256 _fee = underlyingTokenFee;
         underlyingTokenFee = 0;
-         IERC20Extented(underlyingToken).safeTransfer(_treasuryWallet, _fee);
+        IERC20Extented(underlyingToken).safeTransfer(_treasuryWallet, _fee);
     }
 
     function _min(uint256 x, uint256 y) private pure returns (uint256) {
@@ -307,6 +308,8 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
             assembly {
                 success := call(27000, wallet, amount, 0, 0, 0, 0)
             }
+            require(success == true, "Send Eth reverted");
+
             return success;
         }
         (success,) = wallet.call{value: amount}("");
@@ -340,8 +343,10 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
      * @return Whether the user can claim their unstaked amount.
      */
     function isClaimAvailable(address _user) public view returns (bool) {
-        
-        if (address(this).balance -feeCollected >= requests[_user].amount && requests[_user].cooldownTime <= block.timestamp) {
+        if (
+            address(this).balance - feeCollected >= requests[_user].amount
+                && requests[_user].cooldownTime <= block.timestamp
+        ) {
             return true;
         } else {
             return false;
@@ -368,7 +373,7 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     }
 
     function setDepositFee(uint256 _fee) external onlyOwner {
-        require(_fee/FEE_MAX <= 30,"Invalid Fee");
+        require(_fee /  1_000 <= 30, "Invalid Fee");
 
         depositFee = _fee;
     }
@@ -417,17 +422,16 @@ interface IStakingContract {
     function swap(uint256 amount, address receiverAddress) external;
 }
 
-interface ICertificateToken is IERC20Extented
-{
+interface ICertificateToken is IERC20Extented {
     function sharesToBonds(uint256 amount) external view returns (uint256);
 
     function bondsToShares(uint256 amount) external view returns (uint256);
 }
 
 interface IPancakeInterface {
-    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
+    function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut)
+        external
+        pure
+        returns (uint256 amountOut);
     function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
 }
-
-
-
