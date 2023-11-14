@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+
 interface IERC20Extented is IERC20 {
     function decimals() external view returns (uint8);
 }
@@ -80,7 +81,6 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         SwapPoolContract = ISwapPool(_swapPoolContract);
         _treasuryWallet = treasuryWallet;
         lastUpdateTime = block.timestamp;
-
     }
 
     modifier updateReward(address account) {
@@ -237,10 +237,9 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     function claimReferRewards() external nonReentrant {
         uint256 rew = rewards[msg.sender].available;
         require(rew != 0, "No rewards available");
-        require(rewardsToken.balanceOf(address(this)) >= rew, "Wait for rewards to be available");
+        require(address(this).balance >= rew, "Wait for rewards to be available");
         rewards[msg.sender].available = 0;
-        rewardsToken.safeTransfer(msg.sender, rew);
-        _unsafeTransfer(msg.sender, rew,true);
+        _unsafeTransfer(msg.sender, rew, true);
         rewards[msg.sender].claimed += rew;
         emit ReferRewardsClaimed(msg.sender, rew);
     }
@@ -269,9 +268,8 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
     }
 
     function setDepositFee(uint256 _fee) external onlyOwner {
-                require(_fee/FEE_MAX <= 30,"Invalid Fee");
+        require(_fee /1_000 <= 30, "Invalid Fee");
         depositFee = _fee;
-
     }
 
     // Added to support recovering LP Rewards from other systems such as BAL to be distributed to holders
@@ -302,6 +300,8 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
             assembly {
                 success := call(27000, wallet, amount, 0, 0, 0, 0)
             }
+            require(success == true, "Send Eth reverted");
+
             return success;
         }
         (success,) = wallet.call{value: amount}("");
@@ -340,15 +340,16 @@ contract AnkrStaking is ReentrancyGuard, Ownable {
         underlyingTokenFee = 0;
         IERC20Extented(underlyingToken).safeTransfer(_treasuryWallet, _fee);
     }
-  function setMinimumUnStake(uint256 _amount) external onlyOwner {
-        require(_amount >= 0 ether && _amount <= 10 ether,"Amount should be less than 0.1");
-        
+
+    function setMinimumUnStake(uint256 _amount) external onlyOwner {
+        require(_amount >= 0 ether && _amount <= 10 ether, "Amount should be less than 0.1");
+
         minimumUnstake = _amount;
     }
 
     /**
      * @dev Fallback function to receive Ether.
-     * 
+     *
      */
     receive() external payable {}
 }
@@ -385,4 +386,3 @@ interface ISwapPool {
 interface ICertificateToken is IERC20Extented {
     function sharesToBalance(uint256 amount) external view returns (uint256);
 }
-
